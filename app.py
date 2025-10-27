@@ -1,159 +1,122 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 import pickle
-from datetime import datetime, date, time
+import numpy as np
+import pandas as pd
 
-st.set_page_config(page_title="Rain Prediction - XGBRegressor", layout="centered")
-st.title("🌧️ Rain Prediction App (XGBRegressor)")
-st.write("This app predicts **Precipitation Type (Rain or Snow)** using weather data and your trained XGBoost model.")
+# ----- 1. Load Pickled Objects in Correct Order -----
+with open("rain_prediction_model.pkl", "rb") as f:
+    scaling = pickle.load(f)       # StandardScaler
+    transform = pickle.load(f)     # PowerTransformer
+    encoder = pickle.load(f)       # OneHotEncoder
+    best_xgb = pickle.load(f)      # XGBRegressor or XGBClassifier
 
-# -------------------------------
-# Load Model and Transformers
-# -------------------------------
-@st.cache_resource
-def load_pickle_objects(pickle_path="rain_prediction_model.pkl"):
-    try:
-        with open(pickle_path, "rb") as f:
-            best_xgb = pickle.load(f)
-            encoder = pickle.load(f)
-            scaling = pickle.load(f)
-            transform = pickle.load(f)
-        return {"model": best_xgb, "encoder": encoder, "scaler": scaling, "transform": transform}
-    except Exception as e:
-        st.error(f"❌ Error loading pickle file: {e}")
-        return None
+# ----- 2. Define Features List -----
+feature_names = [
+    'Temperature (C)', 'Apparent Temperature (C)', 'Humidity', 'Wind Speed (km/h)',
+    'Wind Bearing (degrees)', 'Visibility (km)', 'Pressure (millibars)',
+    'day_of_year_sin', 'day_of_year_cos', 'hour_sin', 'hour_cos',
+    'Summary_Clear', 'Summary_Foggy', 'Summary_Mostly Cloudy', 'Summary_Others', 'Summary_Overcast', 'Summary_Partly Cloudy',
+    'Daily Summary_Foggy in the morning.', 'Daily Summary_Foggy overnight.', 'Daily Summary_Foggy starting in the evening.',
+    'Daily Summary_Foggy starting overnight continuing until morning.', 'Daily Summary_Foggy until morning.',
+    'Daily Summary_Mostly cloudy starting in the morning.', 'Daily Summary_Mostly cloudy starting overnight.',
+    'Daily Summary_Mostly cloudy throughout the day.', 'Daily Summary_Mostly cloudy until night.',
+    'Daily Summary_Others', 'Daily Summary_Overcast throughout the day.',
+    'Daily Summary_Partly cloudy starting in the afternoon continuing until evening.',
+    'Daily Summary_Partly cloudy starting in the afternoon.',
+    'Daily Summary_Partly cloudy starting in the morning continuing until evening.',
+    'Daily Summary_Partly cloudy starting in the morning continuing until night.',
+    'Daily Summary_Partly cloudy starting in the morning.',
+    'Daily Summary_Partly cloudy starting overnight.',
+    'Daily Summary_Partly cloudy throughout the day.',
+    'Daily Summary_Partly cloudy until evening.',
+    'Daily Summary_Partly cloudy until night.'
+]
 
-objs = load_pickle_objects()
+summary_choices = ["Clear", "Foggy", "Mostly Cloudy", "Others", "Overcast", "Partly Cloudy"]
+daily_summary_choices = [
+    "Foggy in the morning.", "Foggy overnight.", "Foggy starting in the evening.",
+    "Foggy starting overnight continuing until morning.", "Foggy until morning.",
+    "Mostly cloudy starting in the morning.", "Mostly cloudy starting overnight.",
+    "Mostly cloudy throughout the day.", "Mostly cloudy until night.", "Others",
+    "Overcast throughout the day.", "Partly cloudy starting in the afternoon continuing until evening.",
+    "Partly cloudy starting in the afternoon.",
+    "Partly cloudy starting in the morning continuing until evening.",
+    "Partly cloudy starting in the morning continuing until night.",
+    "Partly cloudy starting in the morning.", "Partly cloudy starting overnight.",
+    "Partly cloudy throughout the day.", "Partly cloudy until evening.", "Partly cloudy until night."
+]
 
-# -------------------------------
-# User Input Form
-# -------------------------------
-st.header("🧾 Input Weather Data")
-with st.form("input_form"):
-    st.subheader("📅 Date & Time Input")
-    date_val = st.date_input(
-        "Select Date",
-        value=datetime.today().date(),
-        min_value=date(2000, 1, 1),
-        max_value=date.today()
-    )
-    time_val = st.time_input("Select Time", value=datetime.now().time().replace(microsecond=0))
-    formatted_date = datetime.combine(date_val, time_val)
+# ----- 3. Helper for Cyclical Features -----
+def encode_cyclical(val, max_val):
+    radians = 2 * np.pi * val / max_val
+    return np.sin(radians), np.cos(radians)
 
-    st.subheader("🌤️ Weather Summary (Categorical Inputs)")
-    summary = st.text_input("Summary", value="Overcast")
-    daily_summary = st.text_input("Daily Summary", value="Mostly cloudy throughout the day")
+# ----- 4. Streamlit UI for Inputs -----
+st.title("Rain Prediction App")
 
-    st.subheader("🌡️ Numerical Inputs")
-    temp = st.number_input("Temperature (C)", value=20.0, step=0.1)
-    app_temp = st.number_input("Apparent Temperature (C)", value=19.5, step=0.1)
-    humidity = st.number_input("Humidity (0–1)", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
-    wind_speed = st.number_input("Wind Speed (km/h)", value=10.0, step=0.1)
-    wind_bearing = st.slider("Wind Bearing (degrees)", 0, 360, 180)
-    visibility = st.number_input("Visibility (km)", value=10.0, step=0.1)
-    pressure = st.number_input("Pressure (millibars)", min_value=800.0, max_value=1100.0, value=1013.25, step=0.1)
+temperature = st.number_input("Temperature (°C)", value=25.0)
+apparent_temp = st.number_input("Apparent Temperature (°C)", value=26.0)
+humidity = st.slider("Humidity (0-1)", 0.0, 1.0, 0.5)
+windspeed = st.number_input("Wind Speed (km/h)", value=10.0)
+wind_bearing = st.slider("Wind Bearing (degrees)", 0, 360, 180)
+visibility = st.number_input("Visibility (km)", value=10.0)
+pressure = st.number_input("Pressure (millibars)", value=1010.0)
+date = st.date_input("Date")
+hour = st.number_input("Hour (0-23)", min_value=0, max_value=23, value=12)
+summary = st.selectbox("Summary", summary_choices)
+daily_summary = st.selectbox("Daily Summary", daily_summary_choices)
 
-    submitted = st.form_submit_button("🔮 Predict Precip Type")
+# ----- 5. Cyclical Time Feature Engineering -----
+day_of_year = pd.to_datetime(date).dayofyear
+day_sin, day_cos = encode_cyclical(day_of_year, 365)
+hour_sin, hour_cos = encode_cyclical(hour, 24)
 
-# -------------------------------
-# Feature Engineering Function
-# -------------------------------
-def preprocess_input(df):
-    df = df.copy()
-    df["datetime"] = pd.to_datetime(df["Formatted Date"], utc=True)
-    df["DayOfYear"] = df["datetime"].dt.dayofyear
-    df["Hour"] = df["datetime"].dt.hour
+# ----- 6. Build Main Input DataFrame -----
+input_dict = {
+    'Temperature (C)': [temperature],
+    'Apparent Temperature (C)': [apparent_temp],
+    'Humidity': [humidity],
+    'Wind Speed (km/h)': [windspeed],
+    'Wind Bearing (degrees)': [wind_bearing],
+    'Visibility (km)': [visibility],
+    'Pressure (millibars)': [pressure],
+    'day_of_year_sin': [day_sin],
+    'day_of_year_cos': [day_cos],
+    'hour_sin': [hour_sin],
+    'hour_cos': [hour_cos],
+    'Summary': [summary],
+    'Daily Summary': [daily_summary]
+}
+input_df = pd.DataFrame(input_dict)
 
-    df["day_of_year_sin"] = np.sin(2 * np.pi * df["DayOfYear"] / 365.25)
-    df["day_of_year_cos"] = np.cos(2 * np.pi * df["DayOfYear"] / 365.25)
-    df["hour_sin"] = np.sin(2 * np.pi * df["Hour"] / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df["Hour"] / 24)
+# ----- 7. OneHot Encoding for Categoricals -----
+cat_col = ['Summary', 'Daily Summary']
+encoded_array = encoder.transform(input_df[cat_col])
+encoded_cols = encoder.get_feature_names_out(cat_col)
+encoded_df = pd.DataFrame(encoded_array, columns=encoded_cols, index=input_df.index)
+input_df = pd.concat([input_df.drop(columns=cat_col), encoded_df], axis=1)
 
-    df.drop(["Formatted Date", "datetime", "DayOfYear", "Hour"], axis=1, inplace=True)
-    if "Cloud Cover" in df.columns:
-        df.drop("Cloud Cover", axis=1, inplace=True)
-    if "Summary" in df.columns:
-        df["Summary"] = df["Summary"].replace("", "Others")
-    return df
+# ----- 8. Fill Missing Features, Reorder to Model Spec -----
+for col in feature_names:
+    if col not in input_df.columns:
+        input_df[col] = 0
+input_df = input_df[feature_names]
 
-# -------------------------------
-# Robust Prediction Function
-# -------------------------------
-def safe_predict(objs, input_df):
-    processed_df = preprocess_input(input_df)
-    encoder = objs["encoder"]
-    cat_cols = ["Summary", "Daily Summary"]
+# ----- 9. Power Transform (Numerical Columns) -----
+num_col = ['Humidity', 'Wind Speed (km/h)', 'Visibility (km)']
+input_df[num_col] = transform.transform(input_df[num_col])
 
-    # Encode categoricals and ensure all OHE model columns present!
-    encoded_array = encoder.transform(processed_df[cat_cols])
-    encoded_cols = encoder.get_feature_names_out(cat_cols)
-    encoded_df = pd.DataFrame(encoded_array, columns=encoded_cols, index=processed_df.index)
-    processed_df = processed_df.drop(columns=cat_cols)
-    processed_df = pd.concat([processed_df, encoded_df], axis=1)
+# ----- 10. Standard Scaling (Numerical Columns) -----
+scale_col = [
+    'Temperature (C)', 'Apparent Temperature (C)', 'Humidity',
+    'Wind Speed (km/h)', 'Wind Bearing (degrees)',
+    'Visibility (km)', 'Pressure (millibars)'
+]
+input_df[scale_col] = scaling.transform(input_df[scale_col])
 
-    # Handle zero-filling all missing model features and column order
-    transform = objs["transform"]
-    model = objs["model"]
+# ----- 11. Predict -----
+if st.button("Predict Rain?"):
+    pred = best_xgb.predict(input_df)[0]
+    label = "Snow" if pred == 1 else "Rain"
+    st.success(f"Prediction: **{label}**")
 
-    # Use .feature_names_in_ if available for correct order and feature count
-    if hasattr(transform, "feature_names_in_"):
-        model_features = list(transform.feature_names_in_)
-    else:
-        # Fallback: just use all columns present
-        model_features = list(processed_df.columns)
-    
-    # Fill any missing columns with zero
-    for col in model_features:
-        if col not in processed_df.columns:
-            processed_df[col] = 0
-    processed_df = processed_df[model_features]
-
-    # Transform and predict
-    X_transformed = transform.transform(processed_df)
-    if X_transformed.shape[1] != len(model_features):
-        raise ValueError(f"Feature shape mismatch: expected {len(model_features)}, got {X_transformed.shape[1]}")
-    pred = model.predict(X_transformed)
-    return pred[0]
-
-# -------------------------------
-# Streamlit Output & Prediction
-# -------------------------------
-if submitted:
-    if objs is None:
-        st.error("⚠️ Model not loaded. Ensure 'rain_prediction_model.pkl' is in the same folder.")
-    else:
-        try:
-            row = {
-                "Formatted Date": formatted_date.strftime("%Y-%m-%d %H:%M:%S"),
-                "Summary": summary,
-                "Temperature (C)": float(temp),
-                "Apparent Temperature (C)": float(app_temp),
-                "Humidity": float(humidity),
-                "Wind Speed (km/h)": float(wind_speed),
-                "Wind Bearing (degrees)": int(wind_bearing),
-                "Visibility (km)": float(visibility),
-                "Pressure (millibars)": float(pressure),
-                "Daily Summary": daily_summary
-            }
-            input_df = pd.DataFrame([row])
-            st.write("### 🧩 Raw Input Data")
-            st.dataframe(input_df)
-
-            processed_df = preprocess_input(input_df)
-            st.write("### 🔧 Feature Engineered Data")
-            st.dataframe(processed_df)
-
-            prediction = safe_predict(objs, input_df)
-
-            if isinstance(prediction, (int, float)) and prediction in [0, 1]:
-                label = "🌧️ Rain" if prediction == 0 else "❄️ Snow"
-            else:
-                label = f"{prediction:.3f}"
-
-            st.success(f"### Predicted Precipitation Type: {label}")
-
-        except Exception as e:
-            st.error(f"🚨 Error during prediction: {e}")
-
-st.caption("Robust: all features always aligned; never throws feature name or shape errors. Input validated and safe for all training categories and values.")
