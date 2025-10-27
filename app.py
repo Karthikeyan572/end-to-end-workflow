@@ -1,122 +1,118 @@
 import streamlit as st
+import pandas as pd
 import pickle
 import numpy as np
-import pandas as pd
+from xgboost import XGBClassifier
 
-# ----- 1. Load Pickled Objects in Correct Order -----
-with open("rain_prediction_model.pkl", "rb") as f:
-    scaling = pickle.load(f)       # StandardScaler
-    transform = pickle.load(f)     # PowerTransformer
-    encoder = pickle.load(f)       # OneHotEncoder
-    best_xgb = pickle.load(f)      # XGBRegressor or XGBClassifier
+# --------------------------
+# Load trained model & encoder
+# --------------------------
+@st.cache_resource
+def load_artifacts():
+    model = pickle.load(open('xgb_model.pkl', 'rb'))
+    encoder = pickle.load(open('encoder.pkl', 'rb'))
+    feature_names = pickle.load(open('feature_names.pkl', 'rb'))  # saved during training
+    return model, encoder, feature_names
 
-# ----- 2. Define Features List -----
-feature_names = [
-    'Temperature (C)', 'Apparent Temperature (C)', 'Humidity', 'Wind Speed (km/h)',
-    'Wind Bearing (degrees)', 'Visibility (km)', 'Pressure (millibars)',
-    'day_of_year_sin', 'day_of_year_cos', 'hour_sin', 'hour_cos',
-    'Summary_Clear', 'Summary_Foggy', 'Summary_Mostly Cloudy', 'Summary_Others', 'Summary_Overcast', 'Summary_Partly Cloudy',
-    'Daily Summary_Foggy in the morning.', 'Daily Summary_Foggy overnight.', 'Daily Summary_Foggy starting in the evening.',
-    'Daily Summary_Foggy starting overnight continuing until morning.', 'Daily Summary_Foggy until morning.',
-    'Daily Summary_Mostly cloudy starting in the morning.', 'Daily Summary_Mostly cloudy starting overnight.',
-    'Daily Summary_Mostly cloudy throughout the day.', 'Daily Summary_Mostly cloudy until night.',
-    'Daily Summary_Others', 'Daily Summary_Overcast throughout the day.',
-    'Daily Summary_Partly cloudy starting in the afternoon continuing until evening.',
-    'Daily Summary_Partly cloudy starting in the afternoon.',
-    'Daily Summary_Partly cloudy starting in the morning continuing until evening.',
-    'Daily Summary_Partly cloudy starting in the morning continuing until night.',
-    'Daily Summary_Partly cloudy starting in the morning.',
-    'Daily Summary_Partly cloudy starting overnight.',
-    'Daily Summary_Partly cloudy throughout the day.',
-    'Daily Summary_Partly cloudy until evening.',
-    'Daily Summary_Partly cloudy until night.'
-]
+model, encoder, feature_names = load_artifacts()
 
-summary_choices = ["Clear", "Foggy", "Mostly Cloudy", "Others", "Overcast", "Partly Cloudy"]
-daily_summary_choices = [
-    "Foggy in the morning.", "Foggy overnight.", "Foggy starting in the evening.",
-    "Foggy starting overnight continuing until morning.", "Foggy until morning.",
-    "Mostly cloudy starting in the morning.", "Mostly cloudy starting overnight.",
-    "Mostly cloudy throughout the day.", "Mostly cloudy until night.", "Others",
-    "Overcast throughout the day.", "Partly cloudy starting in the afternoon continuing until evening.",
-    "Partly cloudy starting in the afternoon.",
-    "Partly cloudy starting in the morning continuing until evening.",
-    "Partly cloudy starting in the morning continuing until night.",
-    "Partly cloudy starting in the morning.", "Partly cloudy starting overnight.",
-    "Partly cloudy throughout the day.", "Partly cloudy until evening.", "Partly cloudy until night."
-]
+st.title("🌦️ Rain Type Prediction App")
+st.markdown("Predict the precipitation type using weather parameters.")
 
-# ----- 3. Helper for Cyclical Features -----
-def encode_cyclical(val, max_val):
-    radians = 2 * np.pi * val / max_val
-    return np.sin(radians), np.cos(radians)
+# --------------------------
+# Get user inputs
+# --------------------------
+st.header("Enter Weather Details")
 
-# ----- 4. Streamlit UI for Inputs -----
-st.title("Rain Prediction App")
+col1, col2 = st.columns(2)
 
-temperature = st.number_input("Temperature (°C)", value=25.0)
-apparent_temp = st.number_input("Apparent Temperature (°C)", value=26.0)
-humidity = st.slider("Humidity (0-1)", 0.0, 1.0, 0.5)
-windspeed = st.number_input("Wind Speed (km/h)", value=10.0)
-wind_bearing = st.slider("Wind Bearing (degrees)", 0, 360, 180)
-visibility = st.number_input("Visibility (km)", value=10.0)
-pressure = st.number_input("Pressure (millibars)", value=1010.0)
-date = st.date_input("Date")
-hour = st.number_input("Hour (0-23)", min_value=0, max_value=23, value=12)
-summary = st.selectbox("Summary", summary_choices)
-daily_summary = st.selectbox("Daily Summary", daily_summary_choices)
+with col1:
+    temperature = st.number_input("Temperature (°C)", value=20.0)
+    apparent_temp = st.number_input("Apparent Temperature (°C)", value=19.0)
+    humidity = st.slider("Humidity", 0.0, 1.0, 0.7)
+    wind_speed = st.number_input("Wind Speed (km/h)", value=10.0)
+    wind_bearing = st.number_input("Wind Bearing (°)", value=180.0)
 
-# ----- 5. Cyclical Time Feature Engineering -----
-day_of_year = pd.to_datetime(date).dayofyear
-day_sin, day_cos = encode_cyclical(day_of_year, 365)
-hour_sin, hour_cos = encode_cyclical(hour, 24)
+with col2:
+    visibility = st.number_input("Visibility (km)", value=10.0)
+    pressure = st.number_input("Pressure (millibars)", value=1015.0)
+    summary = st.selectbox(
+        "Summary",
+        ['Partly Cloudy', 'Mostly Cloudy', 'Overcast', 'Clear', 'Foggy', 'Others']
+    )
+    daily_summary = st.selectbox(
+        "Daily Summary",
+        [
+            'Mostly cloudy throughout the day.', 'Partly cloudy throughout the day.',
+            'Overcast throughout the day.', 'Foggy in the morning.',
+            'Partly cloudy until night.', 'Others'
+        ]
+    )
 
-# ----- 6. Build Main Input DataFrame -----
+# --------------------------
+# Create DataFrame
+# --------------------------
 input_dict = {
     'Temperature (C)': [temperature],
     'Apparent Temperature (C)': [apparent_temp],
     'Humidity': [humidity],
-    'Wind Speed (km/h)': [windspeed],
+    'Wind Speed (km/h)': [wind_speed],
     'Wind Bearing (degrees)': [wind_bearing],
     'Visibility (km)': [visibility],
     'Pressure (millibars)': [pressure],
-    'day_of_year_sin': [day_sin],
-    'day_of_year_cos': [day_cos],
-    'hour_sin': [hour_sin],
-    'hour_cos': [hour_cos],
     'Summary': [summary],
     'Daily Summary': [daily_summary]
 }
+
 input_df = pd.DataFrame(input_dict)
 
-# ----- 7. OneHot Encoding for Categoricals -----
+# --------------------------
+# Encode categorical columns
+# --------------------------
 cat_col = ['Summary', 'Daily Summary']
-encoded_array = encoder.transform(input_df[cat_col])
-encoded_cols = encoder.get_feature_names_out(cat_col)
-encoded_df = pd.DataFrame(encoded_array, columns=encoded_cols, index=input_df.index)
-input_df = pd.concat([input_df.drop(columns=cat_col), encoded_df], axis=1)
 
-# ----- 8. Fill Missing Features, Reorder to Model Spec -----
-for col in feature_names:
-    if col not in input_df.columns:
+try:
+    encoded_array = encoder.transform(input_df[cat_col])
+    encoded_cols = encoder.get_feature_names_out(cat_col)
+    encoded_df = pd.DataFrame(encoded_array, columns=encoded_cols, index=input_df.index)
+
+    # Replace original categorical columns with encoded ones
+    input_df = pd.concat([input_df.drop(columns=cat_col), encoded_df], axis=1)
+
+    # Handle missing columns (those present in training but not in current input)
+    missing_cols = [col for col in feature_names if col not in input_df.columns]
+    for col in missing_cols:
         input_df[col] = 0
-input_df = input_df[feature_names]
 
-# ----- 9. Power Transform (Numerical Columns) -----
-num_col = ['Humidity', 'Wind Speed (km/h)', 'Visibility (km)']
-input_df[num_col] = transform.transform(input_df[num_col])
+    # Reorder columns to match model training
+    input_df = input_df[feature_names]
 
-# ----- 10. Standard Scaling (Numerical Columns) -----
-scale_col = [
-    'Temperature (C)', 'Apparent Temperature (C)', 'Humidity',
-    'Wind Speed (km/h)', 'Wind Bearing (degrees)',
-    'Visibility (km)', 'Pressure (millibars)'
-]
-input_df[scale_col] = scaling.transform(input_df[scale_col])
+except Exception as e:
+    st.error(f"Encoding Error: {e}")
+    st.stop()
 
-# ----- 11. Predict -----
-if st.button("Predict Rain?"):
-    pred = best_xgb.predict(input_df)[0]
-    label = "Snow" if pred == 1 else "Rain"
-    st.success(f"Prediction: **{label}**")
+# --------------------------
+# Predict
+# --------------------------
+if st.button("Predict Precipitation Type"):
+    try:
+        prediction = model.predict(input_df)[0]
+        pred_proba = model.predict_proba(input_df)[0]
 
+        label_map = {0: 'rain', 1: 'snow'}  # Adjust based on your encoding
+        st.success(f"Predicted Precipitation Type: **{label_map.get(prediction, 'Unknown')}**")
+
+        st.write("### Prediction Probabilities:")
+        st.write({label_map[i]: round(prob, 3) for i, prob in enumerate(pred_proba)})
+
+    except Exception as e:
+        st.error(f"Error during prediction: {e}")
+
+# --------------------------
+# Debug / Developer Info
+# --------------------------
+with st.expander("🔍 Debug Info"):
+    st.write("Input DataFrame after Encoding:")
+    st.dataframe(input_df)
+    st.write("Columns count:", len(input_df.columns))
+    st.write("Expected count:", len(feature_names))
